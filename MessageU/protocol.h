@@ -1,3 +1,6 @@
+/**
+ * @author Tomer Goodovitch 213213838
+ */
 #pragma once
 #include <cstdint>
 
@@ -24,7 +27,7 @@ namespace MessageU {
 		} // namespace request
 
 		namespace message {
-			enum class Type : uint8_t{ Get_sym_key = 1, Send_sym_key = 2, Text = 3 };
+			enum class Type : uint8_t{ Get_sym_key = 1, Send_sym_key = 2, Text = 3 , File = 4};
 
 			#pragma pack(push, 1)
 			struct Header {

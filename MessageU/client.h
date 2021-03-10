@@ -1,3 +1,6 @@
+/**
+ * @author Tomer Goodovitch 213213838
+ */
 #pragma once
 
 #include <vector>
@@ -15,6 +18,7 @@ namespace MessageU {
 
 	class Client {
 	public:
+		static constexpr int version = 2;
 		static constexpr int private_key_size = 160;
 
 	private:
@@ -43,6 +47,7 @@ namespace MessageU {
 		void PubKey();
 		void GetMsg();
 		void SendMsg();
+		void SendFile();
 		void GetSymKey();
 		void SendSymKey();
 
@@ -62,7 +67,7 @@ namespace MessageU {
 		void RecvGetMsg(const protocol::response::Header& header);
 		void RecvSendMsg(const protocol::response::Header& header);
 		void HandleMessage(protocol::response::Message* msg);
-		
+		void RecvFile(protocol::response::Message* msg, std::shared_ptr<User> user);
 
 		std::string Recv(int size);
 

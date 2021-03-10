@@ -1,3 +1,6 @@
+/**
+ * @author Tomer Goodovitch 213213838
+ */
 #include "client.h"
 #include "menu.h"
 #include "protocol.h"
@@ -11,11 +14,14 @@
 
 #include "boost/asio.hpp"
 #include "boost/algorithm/hex.hpp"
+#include "boost/uuid/uuid.hpp"
+#include "boost/uuid/uuid_io.hpp"
+
 
 namespace MessageU {
 
 	Client::Client(boost::asio::io_context& io_context, const std::string& filename) :
-		_version(1), _socket(io_context), _user(std::make_shared<User>())
+		_version(version), _socket(io_context), _user(std::make_shared<User>())
 	{
 		std::tuple<std::string, int> ip_port = LoadAddr(filename);
 		std::string host = std::get<0>(ip_port);
@@ -33,7 +39,7 @@ namespace MessageU {
 		_users.push_back(_user);
 	}
 	Client::Client(boost::asio::io_context& io_context, const std::string& host, int port) :
-		_version(1), _socket(io_context), _user(std::make_shared<User>()) {
+		_version(version), _socket(io_context), _user(std::make_shared<User>()) {
 		try {
 			_socket.connect(boost::asio::ip::tcp::endpoint(boost::asio::ip::address::from_string(host), port));
 		}
@@ -118,6 +124,9 @@ namespace MessageU {
 		case Menu::Option::SendMsg:
 			SendMsg();
 			break;
+		case Menu::Option::SendFile:
+			SendFile();
+			break;
 		case Menu::Option::GetSymKey:
 			GetSymKey();
 			break;
@@ -125,7 +134,7 @@ namespace MessageU {
 			SendSymKey();
 			break;
 		case Menu::Option::Exit:
-			return;
+			break;
 		}
 	}
 
@@ -204,7 +213,42 @@ namespace MessageU {
 		Send(header, msg, encrypted);
 		HandleRecv();
 	}
+	void Client::SendFile()
+	{
+		std::string name;
+		std::cout << "Enter requested user" << std::endl;
+		getline(std::cin, name);
+		std::shared_ptr<User> user = FindUserByName(name);
+		if (!user) {
+			std::cout << "User " << name << " Not found" << std::endl;
+			return;
+		}
+		if (!user->GetKeyExchanged())
+		{
+			std::cout << "Key was not exchanged with user " << name << std::endl;
+			return;
+		}
+		std::string filename;
+		std::cout << "Enter full path to the file" << std::endl;
+		getline(std::cin, filename);
+		std::ifstream file(filename, std::ifstream::in | std::ifstream::binary);
+		if (!file)
+		{
+			std::cout << "file not found" << std::endl;
+			return;
+		}
+		std::string content;
+		file.seekg(0, std::ifstream::end);
+		content.reserve(file.tellg());
+		file.seekg(0, std::ifstream::beg);
+		content.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+		content = user->encrypt(content);
+		protocol::message::Header msg(user->GetUid().data(), protocol::message::Type::File, content.size());
+		protocol::request::Header header(_user->GetUid().data(), protocol::request::Type::SendMsg, sizeof(msg) + msg._size);
+		Send(header, msg, content);
+		HandleRecv();
 
+	}
 	void Client::GetSymKey() {
 		std::string name;
 		std::cout << "Enter requested user" << std::endl;
@@ -458,12 +502,56 @@ namespace MessageU {
 			}
 			std::cout << "symmetric key received" << std::endl;
 			break;
+		case protocol::message::Type::File:
+			RecvFile(msg, user);
+			break;
 		default:
 			std::cout << "message type error" << std::endl;
 			break;
 		}
 		std::cout << "-----<EOM>-----" << std::endl;
 
+	}
+	void Client::RecvFile(protocol::response::Message* msg, std::shared_ptr<User> user)
+	{
+		constexpr int MAXBUFFER = 4096;
+		CreateDirectoryA("receivedfiles", 0);
+		std::string folder = "receivedfiles\\";
+		boost::uuids::uuid u;
+		std::memcpy(&u, msg->uid, User::uid_size);
+		const std::string tmp = to_string(u);
+		std::string filename = folder + tmp + "_" + std::to_string(msg->mid) + ".txt";
+		std::ofstream file(filename, std::ofstream::out | std::ofstream::binary | std::ofstream::trunc);
+		try
+		{
+			std::string content = user->decrypt(std::string(msg->content, msg->content + msg->size));
+			if (file) {
+				file << content;
+			}
+			else {
+				std::cout << "failed to write file" << std::endl;
+			}
+			char fullname[MAXBUFFER];
+			GetFullPathNameA(filename.c_str(), MAXBUFFER, fullname, NULL);
+			std::cout << fullname << std::endl;
+		}
+		catch (const CryptoPP::InvalidCiphertext& ex) {
+			std::cout << "couldn't decrypt content, most likely because it was wrongly encrypted (e.g with improper symmetric key)." << std::endl;
+		}
+		file.close();
+	}
+
+
+	std::string Client::Recv(const int size) {
+		std::string data;
+		data.resize(size, 0);
+		try {
+			_socket.receive(boost::asio::buffer(data, size));
+		}
+		catch (const boost::system::system_error& e) {
+			std::cerr << "boost::asio::ip::tcp::socket::receive failed with " << e.what() << std::endl;
+		}
+		return data;
 	}
 
 	std::string Client::DecryptKey(const std::string& key)
@@ -478,18 +566,6 @@ namespace MessageU {
 		return arr;
 	}
 
-	std::string Client::Recv(const int size) {
-		std::string data;
-		data.resize(size, 0);
-		try {
-			_socket.receive(boost::asio::buffer(data, size));
-		}
-		catch (const boost::system::system_error& e) {
-			std::cerr << "boost::asio::ip::tcp::socket::receive failed with " << e.what() << std::endl;
-		}
-		return data;
-	}
-
 	void Client::WriteInfoFile() const {
 		std::ofstream file("me.info", std::ofstream::out | std::ofstream::trunc);
 
@@ -501,7 +577,6 @@ namespace MessageU {
 		_encryptorRSA.SavePrivateKey(file);
 		file.close();
 	}
-
 
 } // namespace MessageU
 

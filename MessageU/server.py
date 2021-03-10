@@ -1,3 +1,6 @@
+"""
+@author Tomer Goodovitch 213213838
+"""
 import socket
 import selectors
 import struct

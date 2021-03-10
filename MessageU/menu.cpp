@@ -1,3 +1,6 @@
+/**
+ * @author Tomer Goodovitch 213213838
+ */
 #include "menu.h"
 
 #include <iostream>
@@ -14,6 +17,7 @@ namespace MessageU {
 			std::cout << "3) Request for public key" << std::endl;
 			std::cout << "4) Request for waiting messages" << std::endl;
 			std::cout << "5) Send a text message" << std::endl;
+			std::cout << "50) Send file" << std::endl;
 			std::cout << "51) Send a request for symmetric key" << std::endl;
 			std::cout << "52) Send your symmetric key" << std::endl;
 			std::cout << "0) Exit client" << std::endl;

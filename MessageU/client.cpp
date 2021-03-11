@@ -1,6 +1,3 @@
-/**
- * @author Tomer Goodovitch 213213838
- */
 #include "client.h"
 #include "menu.h"
 #include "protocol.h"
@@ -16,18 +13,20 @@
 #include "boost/algorithm/hex.hpp"
 #include "boost/uuid/uuid.hpp"
 #include "boost/uuid/uuid_io.hpp"
-
+#include "boost/system/error_code.hpp"
 
 namespace MessageU {
 
-	Client::Client(boost::asio::io_context& io_context, const std::string& filename) :
-		_version(version), _socket(io_context), _user(std::make_shared<User>())
+	Client::Client(const std::string& filename) :
+		_version(version), io_context(1) ,_socket(std::make_shared<tcp::socket>(io_context)), _user(std::make_shared<User>())
 	{
 		std::tuple<std::string, int> ip_port = LoadAddr(filename);
 		std::string host = std::get<0>(ip_port);
 		int port = std::get<1>(ip_port);
 		try {
-			_socket.connect(boost::asio::ip::tcp::endpoint(boost::asio::ip::address::from_string(host), port));
+			_socket->connect(boost::asio::ip::tcp::endpoint(boost::asio::ip::address::from_string(host), port));
+			this->ip = host;
+			this->port = port;
 		}
 		catch (const boost::system::system_error& e) {
 			std::cerr << "boost::asio::ip::tcp::socket::connect failed with " << e.what() << std::endl;
@@ -38,10 +37,10 @@ namespace MessageU {
 		_user->SetRSAPublicKey(_encryptorRSA.GetPublicKey());
 		_users.push_back(_user);
 	}
-	Client::Client(boost::asio::io_context& io_context, const std::string& host, int port) :
-		_version(version), _socket(io_context), _user(std::make_shared<User>()) {
+	Client::Client(const std::string& host, int port) :
+		_version(version), io_context(1), _socket(std::make_shared<tcp::socket>(io_context)), ip(host), port(port), _user(std::make_shared<User>()) {
 		try {
-			_socket.connect(boost::asio::ip::tcp::endpoint(boost::asio::ip::address::from_string(host), port));
+			_socket->connect(boost::asio::ip::tcp::endpoint(boost::asio::ip::address::from_string(host), port));
 		}
 		catch (const boost::system::system_error& e) {
 			std::cerr << "boost::asio::ip::tcp::socket::connect failed with " << e.what() << std::endl;
@@ -62,9 +61,23 @@ namespace MessageU {
 		} while (option != Menu::Option::Exit);
 	}
 
+	void Client::Reconnect()
+	{
+		std::cout << "attempting to reconnect..." << std::endl;
+		try
+		{
+			_socket->close();
+			_socket.reset(new tcp::socket(io_context));
+			_socket->connect(boost::asio::ip::tcp::endpoint(boost::asio::ip::address::from_string(ip), port));
+		}
+		catch (const boost::system::system_error& ex)
+		{
+			std::cerr << "failed to reconnect " << ex.what() << std::endl;
+		}
+	}
 	Client::~Client() {
 		try {
-			_socket.close();
+			_socket->close();
 		}
 		catch (const boost::system::system_error& e) {
 			std::cerr << "boost::asio::ip::tcp::socket::close failed with " << e.what() << std::endl;
@@ -299,20 +312,36 @@ namespace MessageU {
 	{
 		try
 		{
-			_socket.send(boost::asio::buffer(payload, size));
+			_socket->send(boost::asio::buffer(payload, size));
 		}
 		catch (const boost::system::system_error& e) {
 			std::cerr << "boost::asio::ip::tcp::socket::send failed with " << e.what() << std::endl;
+			Reconnect();
+			try
+			{
+				_socket->send(boost::asio::buffer(payload, size));
+			}
+			catch (const boost::system::system_error& e) {
+				std::cerr << "boost::asio::ip::tcp::socket::send failed with " << e.what() << std::endl;
+			}
 		}
 	}
 	void Client::Send(const protocol::request::Header& header, const char* payload, const int payload_size) {
 		const char* buffer = reinterpret_cast<const char*>(&header);
 		try {
-			_socket.send(boost::asio::buffer(buffer, sizeof(header)));
-			_socket.send(boost::asio::buffer(payload, payload_size));
+			_socket->send(boost::asio::buffer(buffer, sizeof(header)));
+			_socket->send(boost::asio::buffer(payload, payload_size));
 		}
 		catch (const boost::system::system_error& e) {
 			std::cerr << "boost::asio::ip::tcp::socket::send failed with " << e.what() << std::endl;
+			Reconnect();
+			try {
+				_socket->send(boost::asio::buffer(buffer, sizeof(header)));
+				_socket->send(boost::asio::buffer(payload, payload_size));
+			}
+			catch (const boost::system::system_error& e) {
+				std::cerr << "boost::asio::ip::tcp::socket::send failed with " << e.what() << std::endl;
+			}
 		}
 	}
 
@@ -322,11 +351,20 @@ namespace MessageU {
 		const char* cPayload = reinterpret_cast<const char*>(&payload);
 		try
 		{
-			_socket.send(boost::asio::buffer(cHeader, sizeof(header)));
-			_socket.send(boost::asio::buffer(cPayload, sizeof(payload)));
+			_socket->send(boost::asio::buffer(cHeader, sizeof(header)));
+			_socket->send(boost::asio::buffer(cPayload, sizeof(payload)));
 		}
 		catch (const boost::system::system_error& e) {
 			std::cerr << "boost::asio::ip::tcp::socket::send failed with " << e.what() << std::endl;
+			Reconnect();
+			try
+			{
+				_socket->send(boost::asio::buffer(cHeader, sizeof(header)));
+				_socket->send(boost::asio::buffer(cPayload, sizeof(payload)));
+			}
+			catch (const boost::system::system_error& e) {
+				std::cerr << "boost::asio::ip::tcp::socket::send failed with " << e.what() << std::endl;
+			}
 		}
 
 	}
@@ -336,12 +374,21 @@ namespace MessageU {
 		const char* cPayload = reinterpret_cast<const char*>(&payload);
 		try
 		{
-			_socket.send(boost::asio::buffer(cHeader, sizeof(header)));
-			_socket.send(boost::asio::buffer(cPayload, sizeof(payload)));
-			_socket.send(boost::asio::buffer(content, content.size()));
+			_socket->send(boost::asio::buffer(cHeader, sizeof(header)));
+			_socket->send(boost::asio::buffer(cPayload, sizeof(payload)));
+			_socket->send(boost::asio::buffer(content, content.size()));
 		}
 		catch (const boost::system::system_error& e) {
 			std::cerr << "boost::asio::ip::tcp::socket::send failed with " << e.what() << std::endl;
+			Reconnect();
+			try{
+				_socket->send(boost::asio::buffer(cHeader, sizeof(header)));
+				_socket->send(boost::asio::buffer(cPayload, sizeof(payload)));
+				_socket->send(boost::asio::buffer(content, content.size()));
+			}
+			catch (const boost::system::system_error& e) {
+				std::cerr << "boost::asio::ip::tcp::socket::send failed with " << e.what() << std::endl;
+			}
 		}
 	}
 	std::shared_ptr<User> Client::FindUserByName(std::string name)
@@ -469,6 +516,11 @@ namespace MessageU {
 		switch (static_cast<protocol::message::Type>(msg->type))
 		{
 		case protocol::message::Type::Text:
+			if(user == nullptr)
+			{
+				std::cout << "Key was not exchanged with user unknown" << std::endl;
+				break;
+			}
 			if (!user->GetKeyExchanged())
 			{
 				std::cout << "Key was not exchanged with user " << user->GetName() << std::endl;
@@ -486,9 +538,10 @@ namespace MessageU {
 			break;
 		case protocol::message::Type::Get_sym_key:
 			std::cout << "request for symmetric key" << std::endl;
-			//SendSymKey(user);
 			break;
 		case protocol::message::Type::Send_sym_key:
+			if (user == nullptr)
+				break;
 			try
 			{
 				std::string decrypted_key = DecryptKey(std::string(msg->content, msg->content + msg->size));
@@ -503,7 +556,8 @@ namespace MessageU {
 			std::cout << "symmetric key received" << std::endl;
 			break;
 		case protocol::message::Type::File:
-			RecvFile(msg, user);
+			if(user != nullptr)
+				RecvFile(msg, user);
 			break;
 		default:
 			std::cout << "message type error" << std::endl;
@@ -546,10 +600,18 @@ namespace MessageU {
 		std::string data;
 		data.resize(size, 0);
 		try {
-			_socket.receive(boost::asio::buffer(data, size));
+			_socket->receive(boost::asio::buffer(data, size));
 		}
 		catch (const boost::system::system_error& e) {
 			std::cerr << "boost::asio::ip::tcp::socket::receive failed with " << e.what() << std::endl;
+			Reconnect();
+			try
+			{
+				_socket->receive(boost::asio::buffer(data, size));
+			}
+			catch (const boost::system::system_error& e) {
+				std::cerr << "boost::asio::ip::tcp::socket::receive failed with " << e.what() << std::endl;
+			}
 		}
 		return data;
 	}
@@ -583,8 +645,8 @@ namespace MessageU {
 
 
 int main(int argc, char** argv) {
-	boost::asio::io_context io_context(1);
-	MessageU::Client client(io_context, "server.info");
+	
+	MessageU::Client client("server.info");
 	client.Start();
 	return 0;
 }

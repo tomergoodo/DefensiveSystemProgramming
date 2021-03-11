@@ -1,6 +1,3 @@
-/**
- * @author Tomer Goodovitch 213213838
- */
 #pragma once
 
 #include <string>

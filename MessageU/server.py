@@ -1,11 +1,9 @@
-"""
-@author Tomer Goodovitch 213213838
-"""
 import socket
 import selectors
 import struct
 import uuid
 import time
+import sqlite3
 from enum import Enum
 from datetime import datetime
 
@@ -14,9 +12,10 @@ HOST = ''
 
 class Server:
     def __init__(self, host, port):
-        self.buffer_size = 256 * (10 ** 3)  # 256Kb
+        self.buffer_size = 0xFFFF  # 64KB
         self._version = 1
         self._protocol = Protocol()
+        self._sql_conn = sqlite3.connect("server.db")
         try:
             self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self._socket.bind((host, port))
@@ -30,7 +29,12 @@ class Server:
 
         self._current_peers = {}
         self._clients = {}
-        self._messages = []
+        self._create_tables()
+        self._load_clients()
+
+    def __del__(self):
+        self._socket.close()
+        self._sql_conn.close()
 
     def start(self):
         self._socket.listen(256)
@@ -88,6 +92,7 @@ class Server:
                 self._send_answer(conn, self._protocol.AnswerCodes.FAILURE, None)
             else:
                 client = self._clients[request.uid]
+                client.set_last_seen()
                 if request.code == self._protocol.RequestCodes.CLIENT_LIST.value:
                     payload = self._client_list(request.uid)
                     self._send_answer(conn, self._protocol.AnswerCodes.CLIENT_LIST, payload)
@@ -127,12 +132,14 @@ class Server:
         return data
 
     def _register(self, request):
-        client = Client(request.payload)
+        client = Client(uuid.uuid4(), *Client.parse_client(request.payload))
         for c in self._clients.values():
             if client.name == c.name:
                 return False
         request.uid = client.uid.bytes
         self._clients[client.uid.bytes] = client
+        self._store_register_db(client)
+
         return True
 
     def _client_list(self, uid):
@@ -147,26 +154,23 @@ class Server:
         return uid + self._clients[uid].pub_key
 
     def _store_message(self, conn, request):
-        message = Message(request.payload, request.uid, self._protocol)
+        message = Message(None, *Message.parse_message(request.payload, self._protocol), request.uid)
         while message.content_size_left > 0:
             payload = self._recv(conn, min(message.content_size_left, self.buffer_size))
             request.add_payload(payload)
             request.payload_size_left -= len(payload)
             message.add_content(payload)
             message.content_size_left -= len(payload)
-        self._messages.append(message)
+        self._store_message_db(message)
         return message.to_client + struct.Struct("<I").pack(message.index)
 
     def _get_messages(self, client):
         payload = bytearray(0)
-        msg_to_remove = []
-        for msg in self._messages:
-            if msg.to_client == client.uid.bytes:
-                payload += msg.from_client + struct.Struct("<LBL").pack(msg.index, msg.type,
-                                                                        msg.content_size) + msg.content
-                msg_to_remove.append(msg)
-        for msg in msg_to_remove:
-            self._messages.remove(msg)
+        messages = self._fetch_messages(client.uid.bytes)
+        for msg in messages:
+            payload += msg.from_client + struct.Struct("<LBL").pack(msg.index, msg.type,
+                                                                    msg.content_size) + msg.content
+
         return payload
 
     def _send_answer(self, conn, code, payload):
@@ -179,10 +183,70 @@ class Server:
         except OSError:
             print("OSError: error sending packet")
 
+    def _store_register_db(self, client):
+        cur = self._sql_conn.cursor()
+        cur.execute("""INSERT INTO clients VALUES (?,?,?,?);""",
+                    [client.uid.bytes, client.name, client.pub_key, client.last_seen])
+        self._sql_conn.commit()
+
+    def _load_clients(self):
+        cur = self._sql_conn.cursor()
+        cur.execute("SELECT * FROM clients")
+        clients = cur.fetchall()
+        for c in clients:
+            client = Client(uuid.UUID(bytes=c[0]), c[1], c[2])  # id, name, key
+            self._clients[client.uid.bytes] = client
+
+    def _update_client_last_seen(self, client):
+        cur = self._sql_conn.cursor()
+        cur.execute("UPDATE clients SET LastSeen=? WHERE ID=?", [client.last_seen, client.uid.bytes])
+
+    def _store_message_db(self, message):
+        cur = self._sql_conn.cursor()
+        cur.execute("""INSERT INTO messages VALUES (?,?,?,?,?);""",
+                    [message.index, message.to_client, message.from_client, message.type,
+                     message.content])
+        self._sql_conn.commit()
+
+    def _fetch_messages(self, to_client):
+        cur = self._sql_conn.cursor()
+        cur.execute("SELECT * FROM messages WHERE ToClient=?", [to_client])
+        raw_messages = cur.fetchall()
+        messages = []
+        for raw_message in raw_messages:
+            id = raw_message[0]
+            to_client = raw_message[1]
+            from_client = raw_message[2]
+            type = raw_message[3]
+            content = raw_message[4]
+            messages.append(Message(id, to_client, type, len(content), content, from_client))
+        cur.execute("DELETE FROM messages WHERE ToClient=?", [to_client])
+        return messages
+
+    def _create_tables(self):
+        cur = self._sql_conn.cursor()
+        cur.executescript(f"""
+                CREATE TABLE IF NOT EXISTS clients(
+                ID varchar({self._protocol.uid_size}) NOT NULL PRIMARY KEY,
+                Name varchar({Client.name_size}),
+                PublicKey varchar({Client.pub_key_size}),
+                LastSeen TEXT);
+                """)
+        cur.executescript(f"""
+                CREATE TABLE IF NOT EXISTS messages(
+                ID INTEGER4,
+                ToClient varchar({self._protocol.uid_size}),
+                FromClient varchar({self._protocol.uid_size}),
+                Type INTEGER1,
+                content BLOB);
+                """)
+
 
 class Protocol:
     def __init__(self):
+        self.version = 1
         self.uid_size = 16
+        self.pub_key_size = 160
         self.request_header = struct.Struct("<" + "x" * self.uid_size + "BBL")
         self.request_header_size = struct.calcsize("<" + "x" * self.uid_size + "BBL")
         self.message_header = struct.Struct("<" + "x" * self.uid_size + "BL")
@@ -210,7 +274,7 @@ class Request:
             header_info = protocol.request_header.unpack(header[:protocol.request_header_size])
         except struct.error:
             print("struct.unpack failed")
-            header_info = (1, 0, 0)  # default values
+            header_info = (protocol.version, 0, 0)  # default values
         self.uid = header[:protocol.uid_size]
         self.version = header_info[0]
         self.code = header_info[1]
@@ -225,34 +289,56 @@ class Request:
 class Message:
     counter = 0
 
-    def __init__(self, payload, from_client, protocol):
-        self.index = Message.counter
-        Message.counter += 1
-        self.to_client = payload[:protocol.uid_size]
+    def __init__(self, id, to_client, type, content_size, content, from_client):
+        if id is None:
+            self.index = Message.counter
+            Message.counter += 1
+        else:
+            self.index = id
+        self.to_client = to_client
+        self.type = type
+        self.content_size = content_size
+        self.content = content
+        self.content_size_left = content_size - len(content)
+
+        self.from_client = from_client
+
+    @staticmethod
+    def parse_message(payload, protocol):
         try:
             header = protocol.message_header.unpack(payload[:protocol.message_header_size])
         except struct.error:
             print("struct.unpack failed")
             header = (0, 0)  # default values
-        self.from_client = from_client
-        self.type = header[0]
-        self.content_size = header[1]
-        self.content_size_left = self.content_size - (len(payload) - protocol.message_header_size)
-        self.content = payload[protocol.message_header_size:]
+        to_client = payload[:protocol.uid_size]
+        type = header[0]
+        content_size = header[1]
+        content = payload[protocol.message_header_size:]
+        return to_client, type, content_size, content
 
     def add_content(self, content):
         self.content += content
 
 
 class Client:
-    def __init__(self, payload):
-        self.name_size = 255
-        self.pub_key_size = 160
-        self.name = payload[:self.name_size]
-        self.pub_key = payload[self.name_size:self.name_size + self.pub_key_size]
+    name_size = 255
+    pub_key_size = 160
 
-        self.uid = uuid.uuid4()
+    def __init__(self, uid, name, public_key):
+        self.uid = uid
+        self.name = name
+        self.pub_key = public_key
 
+        now = datetime.now()
+        self.last_seen = now.strftime("%d/%m/%Y %H:%M:%S")
+
+    @staticmethod
+    def parse_client(payload):
+        name = payload[:Client.name_size]
+        pub_key = payload[Client.name_size:Client.name_size + Client.pub_key_size]
+        return name, pub_key
+
+    def set_last_seen(self):
         now = datetime.now()
         self.last_seen = now.strftime("%d/%m/%Y %H:%M:%S")
 

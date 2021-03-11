@@ -2,6 +2,8 @@ receivedfiles
 Dependencies
 DefensiveSystemProgramming
 me.info
+server.db
+server.db-journal
 
 # Created by https://www.toptal.com/developers/gitignore/api/visualstudio,pycharm,c++,windows
 # Edit at https://www.toptal.com/developers/gitignore?templates=visualstudio,pycharm,c++,windows

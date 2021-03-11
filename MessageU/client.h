@@ -1,6 +1,3 @@
-/**
- * @author Tomer Goodovitch 213213838
- */
 #pragma once
 
 #include <vector>
@@ -23,18 +20,22 @@ namespace MessageU {
 
 	private:
 		int _version;
-		tcp::socket _socket;
-
+		boost::asio::io_context io_context;
+		std::shared_ptr<tcp::socket> _socket;
+		std::string ip;
+		int port;
+		
 		std::shared_ptr<User> _user; //self
 		std::vector<std::shared_ptr<User>> _users;
 
 		EncryptorRSA _encryptorRSA;
 	
 	public:
-		Client(boost::asio::io_context& io_context, const std::string& filename);
-		Client(boost::asio::io_context& io_context, const std::string& host, int port);
+		Client(const std::string& filename);
+		Client(const std::string& host, int port);
 
 		void Start();
+		void Reconnect();
 		~Client();
 	private:
 		static std::tuple<std::string, int> LoadAddr(const std::string& filename);
